@@ -1,5 +1,6 @@
 package com.example.mysimpleapp
 
+import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -16,28 +17,78 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.room.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// ==========================================
+// 1. STRUKTUR ROOM DATABASE (SQLite)
+// ==========================================
+
+@Entity(tableName = "attendance_table")
 data class AttendanceRecord(
-    val id: Long = System.currentTimeMillis(),
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
     val name: String,
-    val type: String,
-    val status: String,
+    val type: String,      // "Masuk" atau "Pulang"
+    val status: String,    // "Hadir", "Izin", "Sakit"
     val timestamp: String
 )
+
+@Dao
+interface AttendanceDao {
+    @Query("SELECT * FROM attendance_table ORDER BY id DESC")
+    fun getAllAttendances(): Flow<List<AttendanceRecord>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAttendance(record: AttendanceRecord)
+
+    @Query("DELETE FROM attendance_table")
+    suspend fun deleteAll()
+}
+
+@Database(entities = [AttendanceRecord::class], version = 1, exportSchema = false)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun attendanceDao(): AttendanceDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun getDatabase(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "attendance_database"
+                ).build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+
+// ==========================================
+// 2. TAMPILAN APLIKASI (UI)
+// ==========================================
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val database = AppDatabase.getDatabase(this)
+        val dao = database.attendanceDao()
+
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    AttendanceScreen()
+                    AttendanceScreen(dao)
                 }
             }
         }
@@ -46,12 +97,16 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AttendanceScreen() {
+fun AttendanceScreen(dao: AttendanceDao) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var name by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("Masuk") }
     var selectedStatus by remember { mutableStateOf("Hadir") }
-    val records = remember { mutableStateListOf<AttendanceRecord>() }
+
+    // Membaca data secara otomatis dan realtime dari database SQLite
+    val records by dao.getAllAttendances().collectAsState(initial = emptyList())
 
     val statusOptions = listOf("Hadir", "Izin", "Sakit")
     val typeOptions = listOf("Masuk", "Pulang")
@@ -59,7 +114,7 @@ fun AttendanceScreen() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Aplikasi Presensi", fontWeight = FontWeight.Bold) },
+                title = { Text("Presensi Mandiri (Offline DB)", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -74,6 +129,7 @@ fun AttendanceScreen() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Form Presensi
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -127,16 +183,17 @@ fun AttendanceScreen() {
                                 Toast.makeText(context, "Nama tidak boleh kosong!", Toast.LENGTH_SHORT).show()
                             } else {
                                 val currentTime = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
-                                records.add(
-                                    0,
-                                    AttendanceRecord(
-                                        name = name.trim(),
-                                        type = selectedType,
-                                        status = selectedStatus,
-                                        timestamp = currentTime
-                                    )
+                                val newRecord = AttendanceRecord(
+                                    name = name.trim(),
+                                    type = selectedType,
+                                    status = selectedStatus,
+                                    timestamp = currentTime
                                 )
-                                Toast.makeText(context, "Presensi tercatat!", Toast.LENGTH_SHORT).show()
+                                // Menyimpan data ke database permanen
+                                scope.launch {
+                                    dao.insertAttendance(newRecord)
+                                }
+                                Toast.makeText(context, "Data tersimpan permanen di HP!", Toast.LENGTH_SHORT).show()
                                 name = ""
                             }
                         },
@@ -147,8 +204,25 @@ fun AttendanceScreen() {
                 }
             }
 
-            Text("Riwayat Presensi (${records.size})", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            // Header Riwayat dan Tombol Hapus Semua
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Riwayat Tersimpan (${records.size})", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                if (records.isNotEmpty()) {
+                    TextButton(onClick = {
+                        scope.launch {
+                            dao.deleteAll()
+                        }
+                    }) {
+                        Text("Hapus Semua", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
 
+            // Daftar Riwayat
             if (records.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -156,7 +230,7 @@ fun AttendanceScreen() {
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("Belum ada riwayat", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Belum ada data di memori", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
                 LazyColumn(
