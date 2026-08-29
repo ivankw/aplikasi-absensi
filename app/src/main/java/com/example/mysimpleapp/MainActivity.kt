@@ -5,6 +5,9 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color as AndroidColor
+import android.graphics.Paint
+import android.graphics.Path as AndroidPath
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
@@ -44,8 +47,10 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 
 // ==========================================
 // 1. DATABASE ROOM
@@ -100,7 +105,7 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. PROFILE MANAGER & HELPER TANDA TANGAN
+// 2. PROFILE STORAGE & KONVERSI TANDA TANGAN
 // ==========================================
 
 data class UserProfile(
@@ -141,27 +146,39 @@ class ProfileManager(context: Context) {
     }
 }
 
-fun convertPathsToBase64(paths: List<List<Offset>>, width: Int = 400, height: Int = 200): String {
+// Mengonversi goresan garis ke Gambar PNG transparan dengan skala otomatis
+fun convertPathsToBase64(paths: List<List<Offset>>): String {
     if (paths.isEmpty()) return ""
+    val allPoints = paths.flatten()
+    if (allPoints.isEmpty()) return ""
+
+    val minX = allPoints.minOf { it.x }
+    val maxX = allPoints.maxOf { it.x }
+    val minY = allPoints.minOf { it.y }
+    val maxY = allPoints.maxOf { it.y }
+
+    val padding = 20f
+    val width = max((maxX - minX + padding * 2).toInt(), 120)
+    val height = max((maxY - minY + padding * 2).toInt(), 60)
+
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
-    canvas.drawColor(android.graphics.Color.WHITE)
 
-    val paint = android.graphics.Paint().apply {
-        color = android.graphics.Color.BLACK
-        strokeWidth = 6f
-        style = android.graphics.Paint.Style.STROKE
-        strokeJoin = android.graphics.Paint.Join.ROUND
-        strokeCap = android.graphics.Paint.Cap.ROUND
+    val paint = Paint().apply {
+        color = AndroidColor.BLACK
+        strokeWidth = 5f
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
         isAntiAlias = true
     }
 
     paths.forEach { stroke ->
         if (stroke.isNotEmpty()) {
-            val path = android.graphics.Path()
-            path.moveTo(stroke.first().x, stroke.first().y)
+            val path = AndroidPath()
+            path.moveTo(stroke.first().x - minX + padding, stroke.first().y - minY + padding)
             for (i in 1 until stroke.size) {
-                path.lineTo(stroke[i].x, stroke[i].y)
+                path.lineTo(stroke[i].x - minX + padding, stroke[i].y - minY + padding)
             }
             canvas.drawPath(path, paint)
         }
@@ -184,82 +201,135 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
 }
 
 // ==========================================
-// 3. EXPORT KE EXCEL (TANPA DURASI KERJA)
+// 3. EXPORT KE EXCEL DENGAN FOTO TANDA TANGAN
 // ==========================================
-
-data class DailyAttendanceSummary(
-    val date: String,
-    val schedule: String = "Normal",
-    val checkIn: String = "-",
-    val checkOut: String = "-",
-    val staffSign: String = "[Sudah TTD]",
-    val spvSign: String = ""
-)
 
 fun exportToExcelTemplate(
     context: Context,
     profile: UserProfile,
     records: List<AttendanceRecord>
 ) {
-    if (records.isEmpty()) {
-        Toast.makeText(context, "Tidak ada data untuk diekspor!", Toast.LENGTH_SHORT).show()
-        return
-    }
+    val calendar = Calendar.getInstance()
+    val year = calendar.get(Calendar.YEAR)
+    val month = calendar.get(Calendar.MONTH)
+    val totalDaysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
 
-    val currentMonthPeriod = SimpleDateFormat("MMMM yyyy", Locale("id", "ID")).format(Date())
+    val periodString = SimpleDateFormat("MMMM yyyy", Locale("id", "ID")).format(calendar.time)
 
-    // Kelompokkan data harian
-    val grouped = records.groupBy { it.date }
-    val summaries = grouped.map { (dateStr, dayRecords) ->
-        val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
-        val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
-
-        DailyAttendanceSummary(
-            date = dateStr,
-            schedule = "Normal",
-            checkIn = inRecord?.time ?: "-",
-            checkOut = outRecord?.time ?: "-",
-            staffSign = if (profile.signatureBase64.isNotBlank()) "[TERVERIFIKASI]" else "[TTD]",
-            spvSign = ""
-        )
-    }
-
-    // Format Spreadsheet 6 Kolom
     val htmlContent = StringBuilder().apply {
         append("<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:x='urn:schemas-microsoft-com:office:excel' xmlns='http://www.w3.org/TR/REC-html40'>")
-        append("<head><meta charset='utf-8'><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>ABSENSI</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head>")
-        append("<body>")
-        append("<table border='1' cellspacing='0' cellpadding='5' style='border-collapse:collapse; font-family:Arial, sans-serif; font-size:11pt;'>")
-        
-        // Header Profil
-        append("<tr><td colspan='2' style='font-weight:bold;'>Nama Pegawai</td><td colspan='2'>${profile.name}</td><td style='font-weight:bold;'>Periode Bulan</td><td>$currentMonthPeriod</td></tr>")
-        append("<tr><td colspan='2' style='font-weight:bold;'>Jabatan / Divisi</td><td colspan='2'>${profile.division}</td><td style='font-weight:bold;'>NIK / ID</td><td>${profile.nik}</td></tr>")
-        append("<tr><td colspan='6'></td></tr>")
+        append("<head><meta charset='utf-8'>")
+        append("<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>ABSENSI</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->")
+        append("<style>")
+        append("body { font-family: Arial, sans-serif; font-size: 10pt; }")
+        append("table { border-collapse: collapse; width: 100%; }")
+        append(".header-cell { background-color: #1B365D; color: #FFFFFF; font-weight: bold; text-align: center; vertical-align: middle; border: 1px solid #000000; height: 32px; font-size: 10pt; }")
+        append(".data-cell { text-align: center; vertical-align: middle; border: 1px solid #000000; height: 28px; font-size: 10pt; }")
+        append("</style>")
+        append("</head><body>")
+        append("<table>")
 
-        // Header Kolom Tabel (6 Kolom)
-        append("<tr style='background-color:#E0E0E0; font-weight:bold; text-align:center;'>")
-        append("<th>Tanggal</th><th>Jadwal</th><th>Jam Masuk</th><th>Jam Keluar</th><th>Tanda Tangan Staff</th><th>Tanda Tangan SPV</th>")
+        // Baris 1 - 5: Kosong
+        for (i in 1..5) {
+            append("<tr style='height:18px;'><td colspan='7'></td></tr>")
+        }
+
+        // Baris 6: Nama Pegawai & Periode Bulan
+        append("<tr style='height:24px;'>")
+        append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Nama Pegawai</td>")
+        append("<td colspan='3' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
+        append("<td style='font-weight:bold; font-size:11pt; text-align:right;'>Periode Bulan</td>")
+        append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>$periodString</td>")
         append("</tr>")
 
-        // Data Baris
-        summaries.forEach { row ->
-            append("<tr style='text-align:center;'>")
-            append("<td>${row.date}</td>")
-            append("<td>${row.schedule}</td>")
-            append("<td>${row.checkIn}</td>")
-            append("<td>${row.checkOut}</td>")
-            append("<td>${row.staffSign}</td>")
-            append("<td>${row.spvSign}</td>")
+        // Baris 7: Jabatan / Divisi & NIK / ID
+        append("<tr style='height:24px;'>")
+        append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Jabatan / Divisi</td>")
+        append("<td colspan='3' style='font-size:11pt;'>${profile.division}</td>")
+        append("<td style='font-weight:bold; font-size:11pt; text-align:right;'>NIK / ID</td>")
+        append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>${profile.nik}</td>")
+        append("</tr>")
+
+        // Baris 8: Kosong
+        append("<tr style='height:18px;'><td colspan='7'></td></tr>")
+
+        // Baris 9: Header Tabel
+        append("<tr>")
+        append("<th class='header-cell' style='width:110px;'>Tanggal</th>")
+        append("<th class='header-cell' style='width:100px;'>Jadwal</th>")
+        append("<th class='header-cell' style='width:95px;'>Jam Masuk</th>")
+        append("<th class='header-cell' style='width:95px;'>Jam Keluar</th>")
+        append("<th class='header-cell' style='width:95px;'>Durasi Kerja</th>")
+        append("<th class='header-cell' style='width:140px;'>Tanda Tangan Staff</th>")
+        append("<th class='header-cell' style='width:140px;'>Tanda Tangan SPV</th>")
+        append("</tr>")
+
+        // Baris 10 s.d. Akhir Bulan: Tabel dengan Foto Tanda Tangan Staff
+        for (day in 1..totalDaysInMonth) {
+            val dateKey = String.format(Locale.getDefault(), "%02d/%02d/%04d", day, month + 1, year)
+            val dayRecords = records.filter { it.date == dateKey }
+
+            val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
+            val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
+
+            val checkIn = inRecord?.time ?: ""
+            val checkOut = outRecord?.time ?: ""
+            val schedule = if (inRecord != null) "Normal" else ""
+            
+            // Lampirkan gambar tanda tangan langsung jika sudah absen masuk
+            val staffSignImg = if (inRecord != null && profile.signatureBase64.isNotBlank()) {
+                "<img src='data:image/png;base64,${profile.signatureBase64}' style='max-height:22px; max-width:80px; vertical-align:middle;' />"
+            } else {
+                ""
+            }
+
+            append("<tr>")
+            append("<td class='data-cell'>$dateKey</td>")
+            append("<td class='data-cell'>$schedule</td>")
+            append("<td class='data-cell'>$checkIn</td>")
+            append("<td class='data-cell'>$checkOut</td>")
+            append("<td class='data-cell'></td>")
+            append("<td class='data-cell'>$staffSignImg</td>")
+            append("<td class='data-cell'></td>")
             append("</tr>")
         }
 
-        // Footer Pengesahan
-        append("<tr><td colspan='6'></td></tr>")
-        append("<tr><td colspan='3' style='text-align:center; font-weight:bold;'>Dibuat oleh / Diisi oleh,</td><td colspan='3' style='text-align:center; font-weight:bold;'>Diperiksa & Disetujui oleh,</td></tr>")
-        append("<tr style='height:50px;'><td colspan='3' style='text-align:center;'>${if (profile.signatureBase64.isNotBlank()) "[Tanda Tangan Digital Terlampir]" else ""}</td><td colspan='3'></td></tr>")
-        append("<tr><td colspan='3' style='text-align:center;'>${profile.nik}</td><td colspan='3' style='text-align:center;'>-</td></tr>")
-        append("<tr><td colspan='3' style='text-align:center; font-weight:bold;'>${profile.name}</td><td colspan='3' style='text-align:center; font-weight:bold;'>Supervisor / Atasan Langsung</td></tr>")
-        append("<tr><td colspan='3' style='text-align:center; font-size:9pt;'>Nama Staff / Pegawai</td><td colspan='3' style='text-align:center; font-size:9pt;'>Supervisor / Atasan Langsung</td></tr>")
+        // Baris Pemisah
+        append("<tr style='height:20px;'><td colspan='7'></td></tr>")
+
+        // Footer Baris 42: Judul Pengesahan
+        append("<tr>")
+        append("<td colspan='3' style='text-align:center; font-size:11pt;'>Dibuat oleh / Diisi oleh,</td>")
+        append("<td colspan='4' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
+        append("</tr>")
+
+        // Footer Baris 43-44: Lampirkan Foto Tanda Tangan Pengesahan
+        append("<tr style='height:55px;'>")
+        append("<td colspan='3' style='text-align:center; vertical-align:middle;'>")
+        if (profile.signatureBase64.isNotBlank()) {
+            append("<img src='data:image/png;base64,${profile.signatureBase64}' style='max-height:45px; max-width:130px; vertical-align:middle;' />")
+        }
+        append("</td>")
+        append("<td colspan='4'></td>")
+        append("</tr>")
+
+        // Footer Baris 45: NIK
+        append("<tr>")
+        append("<td colspan='3' style='text-align:center; font-size:10pt;'>${profile.nik}</td>")
+        append("<td colspan='4' style='text-align:center; font-size:10pt;'>-</td>")
+        append("</tr>")
+
+        // Footer Baris 46: Nama
+        append("<tr>")
+        append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>${profile.name}</td>")
+        append("<td colspan='4' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
+        append("</tr>")
+
+        // Footer Baris 47: Sub-Keterangan
+        append("<tr>")
+        append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Nama Staff / Pegawai</td>")
+        append("<td colspan='4' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
+        append("</tr>")
 
         append("</table>")
         append("</body></html>")
@@ -276,14 +346,14 @@ fun exportToExcelTemplate(
 
         val contentUri: Uri = FileProvider.getUriForFile(
             context,
-            "${context.packageName}.fileprovider",
+            "com.example.mysimpleapp.fileprovider",
             file
         )
 
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "application/vnd.ms-excel"
             putExtra(Intent.EXTRA_STREAM, contentUri)
-            putExtra(Intent.EXTRA_SUBJECT, "Laporan Rekap Absensi - ${profile.name}")
+            putExtra(Intent.EXTRA_SUBJECT, "Rekap Presensi - ${profile.name}")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -534,7 +604,6 @@ fun AttendanceScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Card Profil Karyawan & Tanda Tangan
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -575,7 +644,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Login & Logout
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -599,17 +667,15 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Export Sesuai Template
             Button(
                 onClick = { exportToExcelTemplate(context, profile, records) },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D6F42)),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B365D)),
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text("📊 Export ke Excel Sesuai Template", fontWeight = FontWeight.Bold)
             }
 
-            // Header Riwayat
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -623,7 +689,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Daftar Riwayat
             if (records.isEmpty()) {
                 Box(
                     modifier = Modifier
