@@ -19,6 +19,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,8 +38,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
@@ -105,7 +109,7 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. PROFILE STORAGE & KONVERSI TANDA TANGAN
+// 2. PROFILE STORAGE & TANDA TANGAN
 // ==========================================
 
 data class UserProfile(
@@ -146,7 +150,6 @@ class ProfileManager(context: Context) {
     }
 }
 
-// Mengonversi goresan garis ke Gambar PNG transparan dengan skala otomatis
 fun convertPathsToBase64(paths: List<List<Offset>>): String {
     if (paths.isEmpty()) return ""
     val allPoints = paths.flatten()
@@ -200,8 +203,42 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
     }
 }
 
+// Helper untuk menghitung siklus 21 s.d. 20
+fun getCycleDates(): List<String> {
+    val now = Calendar.getInstance()
+    val currentDay = now.get(Calendar.DAY_OF_MONTH)
+
+    val startCal = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+        if (currentDay >= 21) {
+            set(Calendar.DAY_OF_MONTH, 21)
+        } else {
+            add(Calendar.MONTH, -1)
+            set(Calendar.DAY_OF_MONTH, 21)
+        }
+    }
+
+    val endCal = (startCal.clone() as Calendar).apply {
+        add(Calendar.MONTH, 1)
+        set(Calendar.DAY_OF_MONTH, 20)
+    }
+
+    val dates = mutableListOf<String>()
+    val tempCal = startCal.clone() as Calendar
+    val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+
+    while (!tempCal.after(endCal)) {
+        dates.add(dateFormat.format(tempCal.time))
+        tempCal.add(Calendar.DAY_OF_MONTH, 1)
+    }
+    return dates
+}
+
 // ==========================================
-// 3. EXPORT KE EXCEL DENGAN FOTO TANDA TANGAN
+// 3. EXPORT KE EXCEL
 // ==========================================
 
 fun exportToExcelTemplate(
@@ -209,12 +246,7 @@ fun exportToExcelTemplate(
     profile: UserProfile,
     records: List<AttendanceRecord>
 ) {
-    val calendar = Calendar.getInstance()
-    val year = calendar.get(Calendar.YEAR)
-    val month = calendar.get(Calendar.MONTH)
-    val totalDaysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
-
-    val periodString = SimpleDateFormat("MMMM yyyy", Locale("id", "ID")).format(calendar.time)
+    val cycleDates = getCycleDates()
 
     val htmlContent = StringBuilder().apply {
         append("<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:x='urn:schemas-microsoft-com:office:excel' xmlns='http://www.w3.org/TR/REC-html40'>")
@@ -229,20 +261,19 @@ fun exportToExcelTemplate(
         append("</head><body>")
         append("<table>")
 
-        // Baris 1 - 5: Kosong
         for (i in 1..5) {
             append("<tr style='height:18px;'><td colspan='7'></td></tr>")
         }
 
-        // Baris 6: Nama Pegawai & Periode Bulan
+        // Baris 6
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Nama Pegawai</td>")
         append("<td colspan='3' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
         append("<td style='font-weight:bold; font-size:11pt; text-align:right;'>Periode Bulan</td>")
-        append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>$periodString</td>")
+        append("<td style='font-weight:bold; font-size:11pt; text-align:center;'></td>")
         append("</tr>")
 
-        // Baris 7: Jabatan / Divisi & NIK / ID
+        // Baris 7
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Jabatan / Divisi</td>")
         append("<td colspan='3' style='font-size:11pt;'>${profile.division}</td>")
@@ -250,7 +281,6 @@ fun exportToExcelTemplate(
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>${profile.nik}</td>")
         append("</tr>")
 
-        // Baris 8: Kosong
         append("<tr style='height:18px;'><td colspan='7'></td></tr>")
 
         // Baris 9: Header Tabel
@@ -264,9 +294,8 @@ fun exportToExcelTemplate(
         append("<th class='header-cell' style='width:140px;'>Tanda Tangan SPV</th>")
         append("</tr>")
 
-        // Baris 10 s.d. Akhir Bulan: Tabel dengan Foto Tanda Tangan Staff
-        for (day in 1..totalDaysInMonth) {
-            val dateKey = String.format(Locale.getDefault(), "%02d/%02d/%04d", day, month + 1, year)
+        // Baris 10 s.d. Akhir Siklus
+        cycleDates.forEach { dateKey ->
             val dayRecords = records.filter { it.date == dateKey }
 
             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -275,8 +304,7 @@ fun exportToExcelTemplate(
             val checkIn = inRecord?.time ?: ""
             val checkOut = outRecord?.time ?: ""
             val schedule = if (inRecord != null) "Normal" else ""
-            
-            // Lampirkan gambar tanda tangan langsung jika sudah absen masuk
+
             val staffSignImg = if (inRecord != null && profile.signatureBase64.isNotBlank()) {
                 "<img src='data:image/png;base64,${profile.signatureBase64}' style='max-height:22px; max-width:80px; vertical-align:middle;' />"
             } else {
@@ -294,16 +322,15 @@ fun exportToExcelTemplate(
             append("</tr>")
         }
 
-        // Baris Pemisah
         append("<tr style='height:20px;'><td colspan='7'></td></tr>")
 
-        // Footer Baris 42: Judul Pengesahan
+        // Footer Baris 42
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:11pt;'>Dibuat oleh / Diisi oleh,</td>")
         append("<td colspan='4' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
         append("</tr>")
 
-        // Footer Baris 43-44: Lampirkan Foto Tanda Tangan Pengesahan
+        // Footer Baris 43-44: Tanda Tangan
         append("<tr style='height:55px;'>")
         append("<td colspan='3' style='text-align:center; vertical-align:middle;'>")
         if (profile.signatureBase64.isNotBlank()) {
@@ -313,19 +340,19 @@ fun exportToExcelTemplate(
         append("<td colspan='4'></td>")
         append("</tr>")
 
-        // Footer Baris 45: NIK
+        // Footer Baris 45
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:10pt;'>${profile.nik}</td>")
         append("<td colspan='4' style='text-align:center; font-size:10pt;'>-</td>")
         append("</tr>")
 
-        // Footer Baris 46: Nama
+        // Footer Baris 46
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>${profile.name}</td>")
         append("<td colspan='4' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
         append("</tr>")
 
-        // Footer Baris 47: Sub-Keterangan
+        // Footer Baris 47
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Nama Staff / Pegawai</td>")
         append("<td colspan='4' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
@@ -364,7 +391,207 @@ fun exportToExcelTemplate(
 }
 
 // ==========================================
-// 4. ACTIVITY & SCREENS
+// 4. PREVIEW DIALOG COMPOSABLE
+// ==========================================
+
+@Composable
+fun ReportPreviewDialog(
+    profile: UserProfile,
+    records: List<AttendanceRecord>,
+    signatureBitmap: ImageBitmap?,
+    onDismiss: () -> Unit,
+    onExport: () -> Unit
+) {
+    val cycleDates = remember { getCycleDates() }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Top Bar Preview
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Pratinjau Laporan", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = onDismiss) {
+                        Text("✕", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Divider(modifier = Modifier.padding(vertical = 8.dp))
+
+                // Konten Tabel Scrollable (Vertikal & Horizontal)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .border(1.dp, Color.LightGray, RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        // Header Profil Sesuai Baris 6 & 7
+                        Row(modifier = Modifier.padding(bottom = 4.dp)) {
+                            Text("Nama Pegawai      : ", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(profile.name, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.width(32.dp))
+                            Text("Periode Bulan : ", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("-", fontSize = 12.sp)
+                        }
+                        Row(modifier = Modifier.padding(bottom = 12.dp)) {
+                            Text("Jabatan / Divisi : ", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(profile.division, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.width(32.dp))
+                            Text("NIK / ID         : ", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(profile.nik, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
+
+                        // Header Tabel Navy Blue
+                        Row(
+                            modifier = Modifier
+                                .background(Color(0xFF1B365D))
+                                .padding(vertical = 6.dp)
+                        ) {
+                            Text("Tanggal", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(90.dp), textAlign = TextAlign.Center)
+                            Text("Jadwal", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(70.dp), textAlign = TextAlign.Center)
+                            Text("Jam Masuk", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                            Text("Jam Keluar", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                            Text("Durasi", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(60.dp), textAlign = TextAlign.Center)
+                            Text("TTD Staff", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(90.dp), textAlign = TextAlign.Center)
+                            Text("TTD SPV", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                        }
+
+                        // Baris Data Tanggal 21 - 20
+                        cycleDates.forEachIndexed { index, dateKey ->
+                            val dayRecords = records.filter { it.date == dateKey }
+                            val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
+                            val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
+                            val checkIn = inRecord?.time ?: "-"
+                            val checkOut = outRecord?.time ?: "-"
+                            val schedule = if (inRecord != null) "Normal" else "-"
+
+                            val rowBg = if (index % 2 == 0) Color(0xFFF9F9F9) else Color.White
+
+                            Row(
+                                modifier = Modifier
+                                    .background(rowBg)
+                                    .border(0.5.dp, Color(0xFFE0E0E0))
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(dateKey, fontSize = 11.sp, modifier = Modifier.width(90.dp), textAlign = TextAlign.Center)
+                                Text(schedule, fontSize = 11.sp, modifier = Modifier.width(70.dp), textAlign = TextAlign.Center)
+                                Text(checkIn, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                                Text(checkOut, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                                Text("", fontSize = 11.sp, modifier = Modifier.width(60.dp), textAlign = TextAlign.Center)
+
+                                Box(
+                                    modifier = Modifier.width(90.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (inRecord != null && signatureBitmap != null) {
+                                        Image(
+                                            bitmap = signatureBitmap,
+                                            contentDescription = "TTD",
+                                            modifier = Modifier.size(width = 45.dp, height = 20.dp)
+                                        )
+                                    } else {
+                                        Text("-", fontSize = 11.sp)
+                                    }
+                                }
+
+                                Text("", fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Footer Pengesahan
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.width(260.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("Dibuat oleh / Diisi oleh,", fontSize = 11.sp)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                if (signatureBitmap != null) {
+                                    Image(
+                                        bitmap = signatureBitmap,
+                                        contentDescription = "TTD",
+                                        modifier = Modifier.size(width = 90.dp, height = 40.dp)
+                                    )
+                                } else {
+                                    Box(modifier = Modifier.height(40.dp))
+                                }
+                                Text(profile.nik, fontSize = 11.sp)
+                                Text(profile.name, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("Nama Staff / Pegawai", fontSize = 10.sp, color = Color.Gray)
+                            }
+
+                            Column(
+                                modifier = Modifier.width(260.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("Diperiksa & Disetujui oleh,", fontSize = 11.sp)
+                                Spacer(modifier = Modifier.height(46.dp))
+                                Text("-", fontSize = 11.sp)
+                                Text("Supervisor / Atasan Langsung", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("Supervisor / Atasan Langsung", fontSize = 10.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Tombol Aksi Bawah
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Tutup")
+                    }
+
+                    Button(
+                        onClick = onExport,
+                        modifier = Modifier.weight(1.5f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B365D)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("📥 Export & Bagikan Excel", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// 5. ACTIVITY UTAMA & UI
 // ==========================================
 
 class MainActivity : ComponentActivity() {
@@ -559,6 +786,8 @@ fun AttendanceScreen(
     val records by dao.getAllAttendancesAsc().collectAsState(initial = emptyList())
     val groupedRecords = records.groupBy { it.dateDisplay }
 
+    var showPreviewDialog by remember { mutableStateOf(false) }
+
     fun recordAttendance(type: String) {
         val now = Date()
         val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
@@ -579,6 +808,19 @@ fun AttendanceScreen(
             dao.insertAttendance(newRecord)
         }
         Toast.makeText(context, "Berhasil $type pada ${newRecord.time}", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showPreviewDialog) {
+        ReportPreviewDialog(
+            profile = profile,
+            records = records,
+            signatureBitmap = signatureBitmap,
+            onDismiss = { showPreviewDialog = false },
+            onExport = {
+                exportToExcelTemplate(context, profile, records)
+                showPreviewDialog = false
+            }
+        )
     }
 
     Scaffold(
@@ -654,7 +896,7 @@ fun AttendanceScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("LOGIN\n(MASUK)", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Text("LOGIN\n(MASUK)", textAlign = TextAlign.Center)
                 }
 
                 Button(
@@ -663,17 +905,18 @@ fun AttendanceScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("LOGOUT\n(PULANG)", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Text("LOGOUT\n(PULANG)", textAlign = TextAlign.Center)
                 }
             }
 
+            // Tombol Membuka Dialog Preview Terlebih Dahulu
             Button(
-                onClick = { exportToExcelTemplate(context, profile, records) },
+                onClick = { showPreviewDialog = true },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B365D)),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text("📊 Export ke Excel Sesuai Template", fontWeight = FontWeight.Bold)
+                Text("👁️ Preview & Export Laporan Excel", fontWeight = FontWeight.Bold)
             }
 
             Row(
