@@ -55,6 +55,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -256,7 +257,7 @@ fun getCycleDates(): List<String> {
 }
 
 // ==========================================
-// 3. AUTO-UPDATE OVER-THE-AIR (OTA)
+// 3. AUTO-UPDATE (DENGAN DUKUNGAN REDIRECT LENGKAP)
 // ==========================================
 
 data class UpdateInfo(
@@ -295,23 +296,53 @@ suspend fun checkForAppUpdate(context: Context): UpdateInfo = withContext(Dispat
     return@withContext UpdateInfo(hasUpdate = false)
 }
 
+// Helper untuk menangani redirect AWS S3 dari GitHub Releases
+fun openStreamWithRedirects(urlString: String): InputStream {
+    var url = URL(urlString)
+    var conn = url.openConnection() as HttpURLConnection
+    conn.instanceFollowRedirects = true
+    conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
+    conn.connectTimeout = 15000
+    conn.readTimeout = 60000
+
+    var status = conn.responseCode
+    var redirects = 0
+    while ((status == HttpURLConnection.HTTP_MOVED_TEMP || status == HttpURLConnection.HTTP_MOVED_PERM || status == HttpURLConnection.HTTP_SEE_OTHER || status == 307 || status == 308) && redirects < 6) {
+        val newUrl = conn.getHeaderField("Location")
+        conn.disconnect()
+        url = URL(newUrl)
+        conn = url.openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
+        conn.connectTimeout = 15000
+        conn.readTimeout = 60000
+        status = conn.responseCode
+        redirects++
+    }
+    return conn.inputStream
+}
+
 suspend fun downloadAndInstallApk(context: Context, downloadUrl: String) = withContext(Dispatchers.IO) {
     try {
-        val url = URL(downloadUrl)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 10000
-        connection.readTimeout = 30000
-        connection.setRequestProperty("User-Agent", "Mozilla/5.0")
-        connection.connect()
-
         val cacheDir = File(context.cacheDir, "updates")
         cacheDir.mkdirs()
         val apkFile = File(cacheDir, "update.apk")
+        if (apkFile.exists()) apkFile.delete()
 
-        connection.inputStream.use { input ->
+        openStreamWithRedirects(downloadUrl).use { input ->
             FileOutputStream(apkFile).use { output ->
                 input.copyTo(output)
             }
+        }
+
+        apkFile.setReadable(true, false)
+
+        // Validasi: Pastikan ukuran file lebih dari 1 MB (bukan halaman error HTML)
+        if (apkFile.length() < 1000000) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Ukuran file APK tidak valid (${apkFile.length()} byte). Cek koneksi internet.", Toast.LENGTH_LONG).show()
+            }
+            return@withContext
         }
 
         withContext(Dispatchers.Main) {
@@ -889,7 +920,6 @@ fun AttendanceScreen(
     val records by dao.getAllAttendancesAsc().collectAsState(initial = emptyList())
     val groupedRecords = records.groupBy { it.dateDisplay }
 
-    // Evaluasi Status Presensi Hari Ini
     val todayDate = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date())
     val todayRecords = records.filter { it.date == todayDate }
     val hasLoggedInToday = todayRecords.any { it.type.contains("LOGIN") }
@@ -960,7 +990,6 @@ fun AttendanceScreen(
         val currentDisplay = dateDisplayFormat.format(now)
         val currentTime = timeFormat.format(now)
 
-        // Validasi Aturan Pembatasan Harian
         if (type.contains("LOGIN")) {
             if (hasLoggedInToday) {
                 Toast.makeText(context, "Anda sudah melakukan LOGIN hari ini!", Toast.LENGTH_SHORT).show()
@@ -1029,7 +1058,6 @@ fun AttendanceScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Card Profil Karyawan
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -1070,7 +1098,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Indikator Status Presensi Hari Ini
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = if (hasLoggedOutToday) Color(0xFFE8F5E9) else if (hasLoggedInToday) Color(0xFFFFF3E0) else MaterialTheme.colorScheme.surfaceVariant,
@@ -1092,7 +1119,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Login & Logout dengan Validasi Otomatis
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1132,7 +1158,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Preview & Export
             Button(
                 onClick = { showPreviewDialog = true },
                 modifier = Modifier.fillMaxWidth(),
@@ -1142,7 +1167,6 @@ fun AttendanceScreen(
                 Text("👁️ Preview & Export Laporan Excel", fontWeight = FontWeight.Bold)
             }
 
-            // Tombol Cek Update
             OutlinedButton(
                 onClick = {
                     scope.launch {
