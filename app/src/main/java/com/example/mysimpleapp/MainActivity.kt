@@ -210,7 +210,6 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
     }
 }
 
-// Logika penentu jadwal: > 11:00 = SIANG, <= 11:00 = PAGI
 fun determineSchedule(timeStr: String?): String {
     if (timeStr.isNullOrBlank() || timeStr == "-") return ""
     return try {
@@ -890,6 +889,14 @@ fun AttendanceScreen(
     val records by dao.getAllAttendancesAsc().collectAsState(initial = emptyList())
     val groupedRecords = records.groupBy { it.dateDisplay }
 
+    // Evaluasi Status Presensi Hari Ini
+    val todayDate = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date())
+    val todayRecords = records.filter { it.date == todayDate }
+    val hasLoggedInToday = todayRecords.any { it.type.contains("LOGIN") }
+    val hasLoggedOutToday = todayRecords.any { it.type.contains("LOGOUT") }
+    val todayLoginRecord = todayRecords.firstOrNull { it.type.contains("LOGIN") }
+    val todayLogoutRecord = todayRecords.lastOrNull { it.type.contains("LOGOUT") }
+
     var showPreviewDialog by remember { mutableStateOf(false) }
 
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -949,20 +956,41 @@ fun AttendanceScreen(
         val dateDisplayFormat = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale("id", "ID"))
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
+        val currentDate = dateFormat.format(now)
+        val currentDisplay = dateDisplayFormat.format(now)
+        val currentTime = timeFormat.format(now)
+
+        // Validasi Aturan Pembatasan Harian
+        if (type.contains("LOGIN")) {
+            if (hasLoggedInToday) {
+                Toast.makeText(context, "Anda sudah melakukan LOGIN hari ini!", Toast.LENGTH_SHORT).show()
+                return
+            }
+        } else if (type.contains("LOGOUT")) {
+            if (!hasLoggedInToday) {
+                Toast.makeText(context, "Harap LOGIN terlebih dahulu sebelum LOGOUT!", Toast.LENGTH_LONG).show()
+                return
+            }
+            if (hasLoggedOutToday) {
+                Toast.makeText(context, "Anda sudah melakukan LOGOUT hari ini!", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
         val newRecord = AttendanceRecord(
             name = profile.name,
             nik = profile.nik,
             division = profile.division,
             type = type,
-            date = dateFormat.format(now),
-            dateDisplay = dateDisplayFormat.format(now),
-            time = timeFormat.format(now)
+            date = currentDate,
+            dateDisplay = currentDisplay,
+            time = currentTime
         )
 
         scope.launch {
             dao.insertAttendance(newRecord)
         }
-        Toast.makeText(context, "Berhasil $type pada ${newRecord.time}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Berhasil $type pada $currentTime", Toast.LENGTH_SHORT).show()
     }
 
     if (showPreviewDialog) {
@@ -1001,6 +1029,7 @@ fun AttendanceScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Card Profil Karyawan
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -1041,6 +1070,29 @@ fun AttendanceScreen(
                 }
             }
 
+            // Indikator Status Presensi Hari Ini
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = if (hasLoggedOutToday) Color(0xFFE8F5E9) else if (hasLoggedInToday) Color(0xFFFFF3E0) else MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (hasLoggedOutToday) "Status: Selesai Presensi (${todayLoginRecord?.time} - ${todayLogoutRecord?.time})"
+                               else if (hasLoggedInToday) "Status: Sedang Masuk (${todayLoginRecord?.time}) [${determineSchedule(todayLoginRecord?.time)}]"
+                               else "Status: Belum Melakukan Presensi Hari Ini",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (hasLoggedOutToday) Color(0xFF2E7D32) else if (hasLoggedInToday) Color(0xFFE65100) else Color.DarkGray
+                    )
+                }
+            }
+
+            // Tombol Login & Logout dengan Validasi Otomatis
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1048,22 +1100,39 @@ fun AttendanceScreen(
                 Button(
                     onClick = { recordAttendance("LOGIN (MASUK)") },
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    enabled = !hasLoggedInToday,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        disabledContainerColor = Color(0xFFCCCCCC),
+                        disabledContentColor = Color.DarkGray
+                    ),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("LOGIN\n(MASUK)", textAlign = TextAlign.Center)
+                    Text(
+                        text = if (hasLoggedInToday) "SUDAH\nLOGIN" else "LOGIN\n(MASUK)",
+                        textAlign = TextAlign.Center
+                    )
                 }
 
                 Button(
                     onClick = { recordAttendance("LOGOUT (PULANG)") },
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    enabled = hasLoggedInToday && !hasLoggedOutToday,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        disabledContainerColor = Color(0xFFCCCCCC),
+                        disabledContentColor = Color.DarkGray
+                    ),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("LOGOUT\n(PULANG)", textAlign = TextAlign.Center)
+                    Text(
+                        text = if (hasLoggedOutToday) "SUDAH\nLOGOUT" else "LOGOUT\n(PULANG)",
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
 
+            // Tombol Preview & Export
             Button(
                 onClick = { showPreviewDialog = true },
                 modifier = Modifier.fillMaxWidth(),
@@ -1073,6 +1142,7 @@ fun AttendanceScreen(
                 Text("👁️ Preview & Export Laporan Excel", fontWeight = FontWeight.Bold)
             }
 
+            // Tombol Cek Update
             OutlinedButton(
                 onClick = {
                     scope.launch {
