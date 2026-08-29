@@ -9,7 +9,9 @@ import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path as AndroidPath
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -45,11 +47,16 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import androidx.room.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -67,10 +74,10 @@ data class AttendanceRecord(
     val name: String,
     val nik: String,
     val division: String,
-    val type: String,       // "LOGIN (MASUK)" atau "LOGOUT (PULANG)"
-    val date: String,       // "dd/MM/yyyy"
-    val dateDisplay: String,// "EEEE, dd MMMM yyyy"
-    val time: String,       // "HH:mm:ss"
+    val type: String,
+    val date: String,
+    val dateDisplay: String,
+    val time: String,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -203,7 +210,6 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
     }
 }
 
-// Helper untuk menghitung siklus 21 s.d. 20
 fun getCycleDates(): List<String> {
     val now = Calendar.getInstance()
     val currentDay = now.get(Calendar.DAY_OF_MONTH)
@@ -238,7 +244,102 @@ fun getCycleDates(): List<String> {
 }
 
 // ==========================================
-// 3. EXPORT KE EXCEL
+// 3. AUTO-UPDATE OVER-THE-AIR (OTA)
+// ==========================================
+
+data class UpdateInfo(
+    val hasUpdate: Boolean,
+    val releaseNotes: String = "",
+    val downloadUrl: String = ""
+)
+
+suspend fun checkForAppUpdate(context: Context): UpdateInfo = withContext(Dispatchers.IO) {
+    try {
+        val apiUrl = "https://api.github.com/repos/ivankw/aplikasi-absensi/releases/latest"
+        val connection = URL(apiUrl).openConnection() as HttpURLConnection
+        connection.connectTimeout = 7000
+        connection.readTimeout = 7000
+        connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Aplikasi-Absensi)")
+
+        if (connection.responseCode == 200) {
+            val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(responseText)
+            val body = json.optString("body", "Pembaruan versi terbaru tersedia.")
+            val assets = json.optJSONArray("assets")
+
+            if (assets != null && assets.length() > 0) {
+                for (i in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(i)
+                    val name = asset.getString("name")
+                    if (name.endsWith(".apk")) {
+                        val downloadUrl = asset.getString("browser_download_url")
+                        return@withContext UpdateInfo(hasUpdate = true, releaseNotes = body, downloadUrl = downloadUrl)
+                    }
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return@withContext UpdateInfo(hasUpdate = false)
+}
+
+suspend fun downloadAndInstallApk(context: Context, downloadUrl: String) = withContext(Dispatchers.IO) {
+    try {
+        val url = URL(downloadUrl)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.connectTimeout = 10000
+        connection.readTimeout = 30000
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+        connection.connect()
+
+        val cacheDir = File(context.cacheDir, "updates")
+        cacheDir.mkdirs()
+        val apkFile = File(cacheDir, "update.apk")
+
+        connection.inputStream.use { input ->
+            FileOutputStream(apkFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+
+        withContext(Dispatchers.Main) {
+            installApk(context, apkFile)
+        }
+    } catch (e: Exception) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Gagal mengunduh update: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+}
+
+fun installApk(context: Context, apkFile: File) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            Toast.makeText(context, "Izinkan penginstalan aplikasi dari sumber ini", Toast.LENGTH_LONG).show()
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES_SPECIFIED_PRG).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+            return
+        }
+    }
+
+    val uri = FileProvider.getUriForFile(
+        context,
+        "com.example.mysimpleapp.fileprovider",
+        apkFile
+    )
+
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+}
+
+// ==========================================
+// 4. EXPORT KE EXCEL
 // ==========================================
 
 fun exportToExcelTemplate(
@@ -265,7 +366,6 @@ fun exportToExcelTemplate(
             append("<tr style='height:18px;'><td colspan='7'></td></tr>")
         }
 
-        // Baris 6
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Nama Pegawai</td>")
         append("<td colspan='3' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
@@ -273,7 +373,6 @@ fun exportToExcelTemplate(
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'></td>")
         append("</tr>")
 
-        // Baris 7
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Jabatan / Divisi</td>")
         append("<td colspan='3' style='font-size:11pt;'>${profile.division}</td>")
@@ -283,7 +382,6 @@ fun exportToExcelTemplate(
 
         append("<tr style='height:18px;'><td colspan='7'></td></tr>")
 
-        // Baris 9: Header Tabel
         append("<tr>")
         append("<th class='header-cell' style='width:110px;'>Tanggal</th>")
         append("<th class='header-cell' style='width:100px;'>Jadwal</th>")
@@ -294,13 +392,10 @@ fun exportToExcelTemplate(
         append("<th class='header-cell' style='width:140px;'>Tanda Tangan SPV</th>")
         append("</tr>")
 
-        // Baris 10 s.d. Akhir Siklus
         cycleDates.forEach { dateKey ->
             val dayRecords = records.filter { it.date == dateKey }
-
             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
             val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
-
             val checkIn = inRecord?.time ?: ""
             val checkOut = outRecord?.time ?: ""
             val schedule = if (inRecord != null) "Normal" else ""
@@ -324,13 +419,11 @@ fun exportToExcelTemplate(
 
         append("<tr style='height:20px;'><td colspan='7'></td></tr>")
 
-        // Footer Baris 42
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:11pt;'>Dibuat oleh / Diisi oleh,</td>")
         append("<td colspan='4' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
         append("</tr>")
 
-        // Footer Baris 43-44: Tanda Tangan
         append("<tr style='height:55px;'>")
         append("<td colspan='3' style='text-align:center; vertical-align:middle;'>")
         if (profile.signatureBase64.isNotBlank()) {
@@ -340,19 +433,16 @@ fun exportToExcelTemplate(
         append("<td colspan='4'></td>")
         append("</tr>")
 
-        // Footer Baris 45
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:10pt;'>${profile.nik}</td>")
         append("<td colspan='4' style='text-align:center; font-size:10pt;'>-</td>")
         append("</tr>")
 
-        // Footer Baris 46
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>${profile.name}</td>")
         append("<td colspan='4' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
         append("</tr>")
 
-        // Footer Baris 47
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Nama Staff / Pegawai</td>")
         append("<td colspan='4' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
@@ -391,7 +481,7 @@ fun exportToExcelTemplate(
 }
 
 // ==========================================
-// 4. PREVIEW DIALOG COMPOSABLE
+// 5. PREVIEW DIALOG
 // ==========================================
 
 @Composable
@@ -421,7 +511,6 @@ fun ReportPreviewDialog(
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                // Top Bar Preview
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -435,7 +524,6 @@ fun ReportPreviewDialog(
 
                 Divider(modifier = Modifier.padding(vertical = 8.dp))
 
-                // Konten Tabel Scrollable (Vertikal & Horizontal)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -449,7 +537,6 @@ fun ReportPreviewDialog(
                             .verticalScroll(rememberScrollState())
                             .horizontalScroll(rememberScrollState())
                     ) {
-                        // Header Profil Sesuai Baris 6 & 7
                         Row(modifier = Modifier.padding(bottom = 4.dp)) {
                             Text("Nama Pegawai      : ", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text(profile.name, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
@@ -465,7 +552,6 @@ fun ReportPreviewDialog(
                             Text(profile.nik, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         }
 
-                        // Header Tabel Navy Blue
                         Row(
                             modifier = Modifier
                                 .background(Color(0xFF1B365D))
@@ -480,7 +566,6 @@ fun ReportPreviewDialog(
                             Text("TTD SPV", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                         }
 
-                        // Baris Data Tanggal 21 - 20
                         cycleDates.forEachIndexed { index, dateKey ->
                             val dayRecords = records.filter { it.date == dateKey }
                             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -525,7 +610,6 @@ fun ReportPreviewDialog(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Footer Pengesahan
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier.width(260.dp),
@@ -563,7 +647,6 @@ fun ReportPreviewDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Tombol Aksi Bawah
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -591,7 +674,7 @@ fun ReportPreviewDialog(
 }
 
 // ==========================================
-// 5. ACTIVITY UTAMA & UI
+// 6. ACTIVITY UTAMA & UI
 // ==========================================
 
 class MainActivity : ComponentActivity() {
@@ -788,6 +871,57 @@ fun AttendanceScreen(
 
     var showPreviewDialog by remember { mutableStateOf(false) }
 
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var isDownloadingUpdate by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val check = checkForAppUpdate(context)
+        if (check.hasUpdate) {
+            updateInfo = check
+        }
+    }
+
+    if (updateInfo != null && updateInfo!!.hasUpdate) {
+        AlertDialog(
+            onDismissRequest = { updateInfo = null },
+            title = { Text("🚀 Pembaruan Tersedia!", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text("Versi terbaru aplikasi telah dirilis di server.")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (isDownloadingUpdate) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Sedang mengunduh dan menyiapkan instalasi...", fontSize = 12.sp, color = Color.Gray)
+                    }
+                }
+            },
+            confirmButton = {
+                if (!isDownloadingUpdate) {
+                    Button(
+                        onClick = {
+                            isDownloadingUpdate = true
+                            scope.launch {
+                                downloadAndInstallApk(context, updateInfo!!.downloadUrl)
+                                isDownloadingUpdate = false
+                                updateInfo = null
+                            }
+                        }
+                    ) {
+                        Text("Update Sekarang")
+                    }
+                }
+            },
+            dismissButton = {
+                if (!isDownloadingUpdate) {
+                    TextButton(onClick = { updateInfo = null }) {
+                        Text("Nanti Saja")
+                    }
+                }
+            }
+        )
+    }
+
     fun recordAttendance(type: String) {
         val now = Date()
         val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
@@ -909,7 +1043,6 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Membuka Dialog Preview Terlebih Dahulu
             Button(
                 onClick = { showPreviewDialog = true },
                 modifier = Modifier.fillMaxWidth(),
@@ -917,6 +1050,24 @@ fun AttendanceScreen(
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text("👁️ Preview & Export Laporan Excel", fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        Toast.makeText(context, "Memeriksa pembaruan...", Toast.LENGTH_SHORT).show()
+                        val check = checkForAppUpdate(context)
+                        if (check.hasUpdate) {
+                            updateInfo = check
+                        } else {
+                            Toast.makeText(context, "Aplikasi sudah versi terbaru!", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("🔄 Cek Update Aplikasi")
             }
 
             Row(
