@@ -1,9 +1,11 @@
 package com.example.mysimpleapp
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
 import android.widget.Toast
@@ -34,16 +36,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 // ==========================================
-// 1. DATABASE & MODEL DATA
+// 1. DATABASE ROOM
 // ==========================================
 
 @Entity(tableName = "attendance_table")
@@ -54,15 +59,16 @@ data class AttendanceRecord(
     val nik: String,
     val division: String,
     val type: String,       // "LOGIN (MASUK)" atau "LOGOUT (PULANG)"
-    val date: String,       // Format: "Senin, 01/01/2026"
-    val time: String,       // Format: "08:00:00"
+    val date: String,       // "dd/MM/yyyy"
+    val dateDisplay: String,// "EEEE, dd MMMM yyyy"
+    val time: String,       // "HH:mm:ss"
     val timestamp: Long = System.currentTimeMillis()
 )
 
 @Dao
 interface AttendanceDao {
-    @Query("SELECT * FROM attendance_table ORDER BY timestamp DESC")
-    fun getAllAttendances(): Flow<List<AttendanceRecord>>
+    @Query("SELECT * FROM attendance_table ORDER BY timestamp ASC")
+    fun getAllAttendancesAsc(): Flow<List<AttendanceRecord>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAttendance(record: AttendanceRecord)
@@ -71,7 +77,7 @@ interface AttendanceDao {
     suspend fun deleteAll()
 }
 
-@Database(entities = [AttendanceRecord::class], version = 1, exportSchema = false)
+@Database(entities = [AttendanceRecord::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun attendanceDao(): AttendanceDao
 
@@ -85,7 +91,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "attendance_database"
-                ).build()
+                ).fallbackToDestructiveMigration().build()
                 INSTANCE = instance
                 instance
             }
@@ -94,7 +100,7 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. PROFILE STORAGE & HELPER TANDA TANGAN
+// 2. PROFILE MANAGER & HELPER TANDA TANGAN
 // ==========================================
 
 data class UserProfile(
@@ -135,7 +141,6 @@ class ProfileManager(context: Context) {
     }
 }
 
-// Konversi goresan garis ke Gambar Base64
 fun convertPathsToBase64(paths: List<List<Offset>>, width: Int = 400, height: Int = 200): String {
     if (paths.isEmpty()) return ""
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -167,7 +172,6 @@ fun convertPathsToBase64(paths: List<List<Offset>>, width: Int = 400, height: In
     return Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
 }
 
-// Konversi string Base64 kembali ke ImageBitmap Compose
 fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
     return try {
         if (base64Str.isBlank()) return null
@@ -180,7 +184,117 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
 }
 
 // ==========================================
-// 3. ACTIVITY UTAMA & ROUTING
+// 3. EXPORT KE EXCEL (TANPA DURASI KERJA)
+// ==========================================
+
+data class DailyAttendanceSummary(
+    val date: String,
+    val schedule: String = "Normal",
+    val checkIn: String = "-",
+    val checkOut: String = "-",
+    val staffSign: String = "[Sudah TTD]",
+    val spvSign: String = ""
+)
+
+fun exportToExcelTemplate(
+    context: Context,
+    profile: UserProfile,
+    records: List<AttendanceRecord>
+) {
+    if (records.isEmpty()) {
+        Toast.makeText(context, "Tidak ada data untuk diekspor!", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    val currentMonthPeriod = SimpleDateFormat("MMMM yyyy", Locale("id", "ID")).format(Date())
+
+    // Kelompokkan data harian
+    val grouped = records.groupBy { it.date }
+    val summaries = grouped.map { (dateStr, dayRecords) ->
+        val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
+        val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
+
+        DailyAttendanceSummary(
+            date = dateStr,
+            schedule = "Normal",
+            checkIn = inRecord?.time ?: "-",
+            checkOut = outRecord?.time ?: "-",
+            staffSign = if (profile.signatureBase64.isNotBlank()) "[TERVERIFIKASI]" else "[TTD]",
+            spvSign = ""
+        )
+    }
+
+    // Format Spreadsheet 6 Kolom
+    val htmlContent = StringBuilder().apply {
+        append("<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:x='urn:schemas-microsoft-com:office:excel' xmlns='http://www.w3.org/TR/REC-html40'>")
+        append("<head><meta charset='utf-8'><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>ABSENSI</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head>")
+        append("<body>")
+        append("<table border='1' cellspacing='0' cellpadding='5' style='border-collapse:collapse; font-family:Arial, sans-serif; font-size:11pt;'>")
+        
+        // Header Profil
+        append("<tr><td colspan='2' style='font-weight:bold;'>Nama Pegawai</td><td colspan='2'>${profile.name}</td><td style='font-weight:bold;'>Periode Bulan</td><td>$currentMonthPeriod</td></tr>")
+        append("<tr><td colspan='2' style='font-weight:bold;'>Jabatan / Divisi</td><td colspan='2'>${profile.division}</td><td style='font-weight:bold;'>NIK / ID</td><td>${profile.nik}</td></tr>")
+        append("<tr><td colspan='6'></td></tr>")
+
+        // Header Kolom Tabel (6 Kolom)
+        append("<tr style='background-color:#E0E0E0; font-weight:bold; text-align:center;'>")
+        append("<th>Tanggal</th><th>Jadwal</th><th>Jam Masuk</th><th>Jam Keluar</th><th>Tanda Tangan Staff</th><th>Tanda Tangan SPV</th>")
+        append("</tr>")
+
+        // Data Baris
+        summaries.forEach { row ->
+            append("<tr style='text-align:center;'>")
+            append("<td>${row.date}</td>")
+            append("<td>${row.schedule}</td>")
+            append("<td>${row.checkIn}</td>")
+            append("<td>${row.checkOut}</td>")
+            append("<td>${row.staffSign}</td>")
+            append("<td>${row.spvSign}</td>")
+            append("</tr>")
+        }
+
+        // Footer Pengesahan
+        append("<tr><td colspan='6'></td></tr>")
+        append("<tr><td colspan='3' style='text-align:center; font-weight:bold;'>Dibuat oleh / Diisi oleh,</td><td colspan='3' style='text-align:center; font-weight:bold;'>Diperiksa & Disetujui oleh,</td></tr>")
+        append("<tr style='height:50px;'><td colspan='3' style='text-align:center;'>${if (profile.signatureBase64.isNotBlank()) "[Tanda Tangan Digital Terlampir]" else ""}</td><td colspan='3'></td></tr>")
+        append("<tr><td colspan='3' style='text-align:center;'>${profile.nik}</td><td colspan='3' style='text-align:center;'>-</td></tr>")
+        append("<tr><td colspan='3' style='text-align:center; font-weight:bold;'>${profile.name}</td><td colspan='3' style='text-align:center; font-weight:bold;'>Supervisor / Atasan Langsung</td></tr>")
+        append("<tr><td colspan='3' style='text-align:center; font-size:9pt;'>Nama Staff / Pegawai</td><td colspan='3' style='text-align:center; font-size:9pt;'>Supervisor / Atasan Langsung</td></tr>")
+
+        append("</table>")
+        append("</body></html>")
+    }.toString()
+
+    try {
+        val fileName = "ABSENSI_${profile.name.replace(" ", "_")}_${System.currentTimeMillis()}.xls"
+        val cachePath = File(context.cacheDir, "exports")
+        cachePath.mkdirs()
+        val file = File(cachePath, fileName)
+        val fos = FileOutputStream(file)
+        fos.write(htmlContent.toByteArray(Charsets.UTF_8))
+        fos.close()
+
+        val contentUri: Uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/vnd.ms-excel"
+            putExtra(Intent.EXTRA_STREAM, contentUri)
+            putExtra(Intent.EXTRA_SUBJECT, "Laporan Rekap Absensi - ${profile.name}")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        context.startActivity(Intent.createChooser(shareIntent, "Kirim / Buka File Excel"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Gagal mengekspor file: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
+
+// ==========================================
+// 4. ACTIVITY & SCREENS
 // ==========================================
 
 class MainActivity : ComponentActivity() {
@@ -214,10 +328,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ==========================================
-// 4. UI: ONBOARDING + KOLOM TANDA TANGAN
-// ==========================================
-
 @Composable
 fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
     val context = LocalContext.current
@@ -225,7 +335,6 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
     var nik by remember { mutableStateOf("") }
     var division by remember { mutableStateOf("PBH") }
 
-    // State untuk menyimpan goresan garis tanda tangan
     var paths by remember { mutableStateOf(listOf<List<Offset>>()) }
     var currentPath by remember { mutableStateOf(listOf<Offset>()) }
 
@@ -236,9 +345,9 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Registrasi Profil Awal", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Registrasi Data Awal", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Isi data & tanda tangan untuk mulai menggunakan aplikasi",
+            "Isi data & tanda tangan untuk mencetak laporan Excel",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -248,7 +357,7 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
         OutlinedTextField(
             value = name,
             onValueChange = { name = it },
-            label = { Text("Nama Lengkap") },
+            label = { Text("Nama Pegawai / Lengkap") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
@@ -275,13 +384,12 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Label Kolom Tanda Tangan
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Tanda Tangan Digital:", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Tanda Tangan Staff:", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             if (paths.isNotEmpty() || currentPath.isNotEmpty()) {
                 TextButton(onClick = {
                     paths = emptyList()
@@ -292,18 +400,15 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
             }
         }
 
-        // Kanvas Tanda Tangan
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(160.dp)
+                .height(150.dp)
                 .background(Color.White, RoundedCornerShape(8.dp))
                 .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
                 .pointerInput(Unit) {
                     detectDragGestures(
-                        onDragStart = { offset ->
-                            currentPath = listOf(offset)
-                        },
+                        onDragStart = { offset -> currentPath = listOf(offset) },
                         onDrag = { change, _ ->
                             change.consume()
                             currentPath = currentPath + change.position
@@ -317,15 +422,10 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             if (paths.isEmpty() && currentPath.isEmpty()) {
-                Text(
-                    "Goreskan tanda tangan di sini",
-                    color = Color.LightGray,
-                    fontSize = 13.sp
-                )
+                Text("Goreskan tanda tangan di sini", color = Color.LightGray, fontSize = 13.sp)
             }
 
             Canvas(modifier = Modifier.fillMaxSize()) {
-                // Gambar garis yang sudah selesai
                 paths.forEach { stroke ->
                     for (i in 0 until stroke.size - 1) {
                         drawLine(
@@ -337,7 +437,6 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
                         )
                     }
                 }
-                // Gambar garis yang sedang disentuh
                 if (currentPath.size > 1) {
                     for (i in 0 until currentPath.size - 1) {
                         drawLine(
@@ -357,27 +456,23 @@ fun OnboardingScreen(profileManager: ProfileManager, onComplete: () -> Unit) {
         Button(
             onClick = {
                 if (name.isBlank() || nik.isBlank() || division.isBlank()) {
-                    Toast.makeText(context, "Nama, NIK, dan Divisi wajib diisi!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Semua data wajib diisi!", Toast.LENGTH_SHORT).show()
                 } else if (paths.isEmpty()) {
                     Toast.makeText(context, "Harap bubuhkan tanda tangan Anda!", Toast.LENGTH_SHORT).show()
                 } else {
                     val signatureBase64 = convertPathsToBase64(paths)
                     profileManager.saveProfile(name, nik, division, signatureBase64)
-                    Toast.makeText(context, "Profil & Tanda Tangan berhasil disimpan!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Profil berhasil disimpan!", Toast.LENGTH_SHORT).show()
                     onComplete()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(8.dp)
         ) {
-            Text("Simpan & Masuk ke Absensi", fontSize = 16.sp)
+            Text("Simpan & Buka Form Absen", fontSize = 16.sp)
         }
     }
 }
-
-// ==========================================
-// 5. UI: HALAMAN ABSENSI & RIWAYAT BY DAY
-// ==========================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -391,30 +486,29 @@ fun AttendanceScreen(
     val profile = profileManager.getProfile()
     val signatureBitmap = remember(profile.signatureBase64) { decodeBase64ToBitmap(profile.signatureBase64) }
 
-    val records by dao.getAllAttendances().collectAsState(initial = emptyList())
-    val groupedRecords = records.groupBy { it.date }
+    val records by dao.getAllAttendancesAsc().collectAsState(initial = emptyList())
+    val groupedRecords = records.groupBy { it.dateDisplay }
 
     fun recordAttendance(type: String) {
         val now = Date()
-        val dateFormat = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale("id", "ID"))
+        val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+        val dateDisplayFormat = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale("id", "ID"))
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-
-        val currentDate = dateFormat.format(now)
-        val currentTime = timeFormat.format(now)
 
         val newRecord = AttendanceRecord(
             name = profile.name,
             nik = profile.nik,
             division = profile.division,
             type = type,
-            date = currentDate,
-            time = currentTime
+            date = dateFormat.format(now),
+            dateDisplay = dateDisplayFormat.format(now),
+            time = timeFormat.format(now)
         )
 
         scope.launch {
             dao.insertAttendance(newRecord)
         }
-        Toast.makeText(context, "Berhasil $type pada $currentTime", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Berhasil $type pada ${newRecord.time}", Toast.LENGTH_SHORT).show()
     }
 
     Scaffold(
@@ -440,7 +534,7 @@ fun AttendanceScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Card Data Profil Karyawan & Tanda Tangan
+            // Card Profil Karyawan & Tanda Tangan
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -460,20 +554,19 @@ fun AttendanceScreen(
                         Text("Divisi: ${profile.division}", fontSize = 13.sp)
                     }
 
-                    // Tampilkan Tanda Tangan Pengguna
                     if (signatureBitmap != null) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("TTD Pengguna", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("TTD Staff", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Box(
                                 modifier = Modifier
-                                    .size(width = 90.dp, height = 50.dp)
+                                    .size(width = 80.dp, height = 45.dp)
                                     .background(Color.White, RoundedCornerShape(4.dp))
                                     .border(1.dp, Color.LightGray, RoundedCornerShape(4.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Image(
                                     bitmap = signatureBitmap,
-                                    contentDescription = "Tanda Tangan Pengguna",
+                                    contentDescription = "Tanda Tangan",
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
@@ -482,7 +575,7 @@ fun AttendanceScreen(
                 }
             }
 
-            // Tombol Login (Masuk) dan Logout (Pulang)
+            // Tombol Login & Logout
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -506,13 +599,23 @@ fun AttendanceScreen(
                 }
             }
 
-            // Header Riwayat Presensi
+            // Tombol Export Sesuai Template
+            Button(
+                onClick = { exportToExcelTemplate(context, profile, records) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D6F42)),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("📊 Export ke Excel Sesuai Template", fontWeight = FontWeight.Bold)
+            }
+
+            // Header Riwayat
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Riwayat Presensi", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("Riwayat Presensi (${records.size})", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 if (records.isNotEmpty()) {
                     TextButton(onClick = { scope.launch { dao.deleteAll() } }) {
                         Text("Hapus Riwayat", color = MaterialTheme.colorScheme.error)
@@ -520,7 +623,7 @@ fun AttendanceScreen(
                 }
             }
 
-            // Daftar Riwayat yang Dikelompokkan Berdasarkan Hari
+            // Daftar Riwayat
             if (records.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -528,7 +631,7 @@ fun AttendanceScreen(
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("Belum ada riwayat absensi", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Belum ada data presensi", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
                 LazyColumn(
