@@ -25,14 +25,19 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Mengunci sertifikat agar sama di setiap build
+      - name: Generate Fixed Keystore
+        run: |
+          keytool -genkeypair -alias androiddebugkey -keypass android -keystore app/debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
+
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: gradle assembleDebug -PappVersionCode=${{ github.run_number }} --stacktrace
 
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "latest"
-          name: "Update Aplikasi Presensi"
+          name: "Update Aplikasi Presensi (Build ${{ github.run_number }})"
           body: "Rilis versi terbaru otomatis dari GitHub Actions."
           draft: false
           prerelease: false
