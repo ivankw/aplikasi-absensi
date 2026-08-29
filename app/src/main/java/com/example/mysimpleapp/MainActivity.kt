@@ -316,8 +316,9 @@ fun installApk(context: Context, apkFile: File) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         if (!context.packageManager.canRequestPackageInstalls()) {
             Toast.makeText(context, "Izinkan penginstalan aplikasi dari sumber ini", Toast.LENGTH_LONG).show()
-            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES_SPECIFIED_PRG).apply {
-                data = Uri.parse("package:${context.packageName}")
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                setData(Uri.parse("package:${context.packageName}"))
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
             return
