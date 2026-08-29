@@ -257,7 +257,7 @@ fun getCycleDates(): List<String> {
 }
 
 // ==========================================
-// 3. AUTO-UPDATE (DENGAN DUKUNGAN REDIRECT LENGKAP)
+// 3. AUTO-UPDATE OVER-THE-AIR (OTA)
 // ==========================================
 
 data class UpdateInfo(
@@ -296,7 +296,6 @@ suspend fun checkForAppUpdate(context: Context): UpdateInfo = withContext(Dispat
     return@withContext UpdateInfo(hasUpdate = false)
 }
 
-// Helper untuk menangani redirect AWS S3 dari GitHub Releases
 fun openStreamWithRedirects(urlString: String): InputStream {
     var url = URL(urlString)
     var conn = url.openConnection() as HttpURLConnection
@@ -337,7 +336,6 @@ suspend fun downloadAndInstallApk(context: Context, downloadUrl: String) = withC
 
         apkFile.setReadable(true, false)
 
-        // Validasi: Pastikan ukuran file lebih dari 1 MB (bukan halaman error HTML)
         if (apkFile.length() < 1000000) {
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, "Ukuran file APK tidak valid (${apkFile.length()} byte). Cek koneksi internet.", Toast.LENGTH_LONG).show()
@@ -383,7 +381,7 @@ fun installApk(context: Context, apkFile: File) {
 }
 
 // ==========================================
-// 4. EXPORT KE EXCEL
+// 4. EXPORT KE EXCEL (6 KOLOM, TANPA DURASI)
 // ==========================================
 
 fun exportToExcelTemplate(
@@ -406,36 +404,41 @@ fun exportToExcelTemplate(
         append("</head><body>")
         append("<table>")
 
+        // Baris 1 - 5: Kosong
         for (i in 1..5) {
-            append("<tr style='height:18px;'><td colspan='7'></td></tr>")
+            append("<tr style='height:18px;'><td colspan='6'></td></tr>")
         }
 
+        // Baris 6: Nama Pegawai & Periode Bulan
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Nama Pegawai</td>")
-        append("<td colspan='3' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
+        append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
         append("<td style='font-weight:bold; font-size:11pt; text-align:right;'>Periode Bulan</td>")
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'></td>")
         append("</tr>")
 
+        // Baris 7: Jabatan / Divisi & NIK / ID
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Jabatan / Divisi</td>")
-        append("<td colspan='3' style='font-size:11pt;'>${profile.division}</td>")
+        append("<td colspan='2' style='font-size:11pt;'>${profile.division}</td>")
         append("<td style='font-weight:bold; font-size:11pt; text-align:right;'>NIK / ID</td>")
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>${profile.nik}</td>")
         append("</tr>")
 
-        append("<tr style='height:18px;'><td colspan='7'></td></tr>")
+        // Baris 8: Kosong
+        append("<tr style='height:18px;'><td colspan='6'></td></tr>")
 
+        // Baris 9: Header Tabel (6 Kolom: Tanpa Durasi)
         append("<tr>")
         append("<th class='header-cell' style='width:110px;'>Tanggal</th>")
         append("<th class='header-cell' style='width:100px;'>Jadwal</th>")
         append("<th class='header-cell' style='width:95px;'>Jam Masuk</th>")
         append("<th class='header-cell' style='width:95px;'>Jam Keluar</th>")
-        append("<th class='header-cell' style='width:95px;'>Durasi Kerja</th>")
         append("<th class='header-cell' style='width:140px;'>Tanda Tangan Staff</th>")
         append("<th class='header-cell' style='width:140px;'>Tanda Tangan SPV</th>")
         append("</tr>")
 
+        // Baris 10 s.d. Akhir Siklus (6 Kolom Data)
         cycleDates.forEach { dateKey ->
             val dayRecords = records.filter { it.date == dateKey }
             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -455,41 +458,46 @@ fun exportToExcelTemplate(
             append("<td class='data-cell'>$schedule</td>")
             append("<td class='data-cell'>$checkIn</td>")
             append("<td class='data-cell'>$checkOut</td>")
-            append("<td class='data-cell'></td>")
             append("<td class='data-cell'>$staffSignImg</td>")
             append("<td class='data-cell'></td>")
             append("</tr>")
         }
 
-        append("<tr style='height:20px;'><td colspan='7'></td></tr>")
+        // Baris Pemisah
+        append("<tr style='height:20px;'><td colspan='6'></td></tr>")
 
+        // Footer Baris 42: Judul Pengesahan
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:11pt;'>Dibuat oleh / Diisi oleh,</td>")
-        append("<td colspan='4' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
+        append("<td colspan='3' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
         append("</tr>")
 
+        // Footer Baris 43-44: Tanda Tangan
         append("<tr style='height:55px;'>")
         append("<td colspan='3' style='text-align:center; vertical-align:middle;'>")
         if (profile.signatureBase64.isNotBlank()) {
             append("<img src='data:image/png;base64,${profile.signatureBase64}' style='max-height:45px; max-width:130px; vertical-align:middle;' />")
         }
         append("</td>")
-        append("<td colspan='4'></td>")
+        append("<td colspan='3'></td>")
         append("</tr>")
 
+        // Footer Baris 45: NIK
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:10pt;'>${profile.nik}</td>")
-        append("<td colspan='4' style='text-align:center; font-size:10pt;'>-</td>")
+        append("<td colspan='3' style='text-align:center; font-size:10pt;'>-</td>")
         append("</tr>")
 
+        // Footer Baris 46: Nama
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>${profile.name}</td>")
-        append("<td colspan='4' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
+        append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
         append("</tr>")
 
+        // Footer Baris 47: Sub-Keterangan
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Nama Staff / Pegawai</td>")
-        append("<td colspan='4' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
+        append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
         append("</tr>")
 
         append("</table>")
@@ -525,7 +533,7 @@ fun exportToExcelTemplate(
 }
 
 // ==========================================
-// 5. PREVIEW DIALOG
+// 5. PREVIEW DIALOG (6 KOLOM, TANPA DURASI)
 // ==========================================
 
 @Composable
@@ -596,6 +604,7 @@ fun ReportPreviewDialog(
                             Text(profile.nik, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         }
 
+                        // Header Tabel Navy Blue (6 Kolom)
                         Row(
                             modifier = Modifier
                                 .background(Color(0xFF1B365D))
@@ -605,11 +614,11 @@ fun ReportPreviewDialog(
                             Text("Jadwal", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(70.dp), textAlign = TextAlign.Center)
                             Text("Jam Masuk", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                             Text("Jam Keluar", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
-                            Text("Durasi", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(60.dp), textAlign = TextAlign.Center)
                             Text("TTD Staff", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(90.dp), textAlign = TextAlign.Center)
                             Text("TTD SPV", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                         }
 
+                        // Baris Data (6 Kolom)
                         cycleDates.forEachIndexed { index, dateKey ->
                             val dayRecords = records.filter { it.date == dateKey }
                             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -638,7 +647,6 @@ fun ReportPreviewDialog(
                                 )
                                 Text(checkIn, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                                 Text(checkOut, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
-                                Text("", fontSize = 11.sp, modifier = Modifier.width(60.dp), textAlign = TextAlign.Center)
 
                                 Box(
                                     modifier = Modifier.width(90.dp),
@@ -661,9 +669,10 @@ fun ReportPreviewDialog(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
+                        // Footer Pengesahan
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Column(
-                                modifier = Modifier.width(260.dp),
+                                modifier = Modifier.width(245.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text("Dibuat oleh / Diisi oleh,", fontSize = 11.sp)
@@ -683,7 +692,7 @@ fun ReportPreviewDialog(
                             }
 
                             Column(
-                                modifier = Modifier.width(260.dp),
+                                modifier = Modifier.width(245.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text("Diperiksa & Disetujui oleh,", fontSize = 11.sp)
