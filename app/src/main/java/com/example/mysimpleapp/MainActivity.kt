@@ -210,6 +210,19 @@ fun decodeBase64ToBitmap(base64Str: String): ImageBitmap? {
     }
 }
 
+// Logika penentu jadwal: > 11:00 = SIANG, <= 11:00 = PAGI
+fun determineSchedule(timeStr: String?): String {
+    if (timeStr.isNullOrBlank() || timeStr == "-") return ""
+    return try {
+        val parts = timeStr.split(":")
+        val hour = parts[0].toInt()
+        val minute = if (parts.size > 1) parts[1].toInt() else 0
+        if (hour * 60 + minute > 11 * 60) "SIANG" else "PAGI"
+    } catch (_: Exception) {
+        "PAGI"
+    }
+}
+
 fun getCycleDates(): List<String> {
     val now = Calendar.getInstance()
     val currentDay = now.get(Calendar.DAY_OF_MONTH)
@@ -399,7 +412,7 @@ fun exportToExcelTemplate(
             val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
             val checkIn = inRecord?.time ?: ""
             val checkOut = outRecord?.time ?: ""
-            val schedule = if (inRecord != null) "Normal" else ""
+            val schedule = if (inRecord != null) determineSchedule(checkIn) else ""
 
             val staffSignImg = if (inRecord != null && profile.signatureBase64.isNotBlank()) {
                 "<img src='data:image/png;base64,${profile.signatureBase64}' style='max-height:22px; max-width:80px; vertical-align:middle;' />"
@@ -573,7 +586,7 @@ fun ReportPreviewDialog(
                             val outRecord = dayRecords.lastOrNull { it.type.contains("LOGOUT") }
                             val checkIn = inRecord?.time ?: "-"
                             val checkOut = outRecord?.time ?: "-"
-                            val schedule = if (inRecord != null) "Normal" else "-"
+                            val schedule = if (inRecord != null) determineSchedule(inRecord.time) else "-"
 
                             val rowBg = if (index % 2 == 0) Color(0xFFF9F9F9) else Color.White
 
@@ -585,7 +598,14 @@ fun ReportPreviewDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(dateKey, fontSize = 11.sp, modifier = Modifier.width(90.dp), textAlign = TextAlign.Center)
-                                Text(schedule, fontSize = 11.sp, modifier = Modifier.width(70.dp), textAlign = TextAlign.Center)
+                                Text(
+                                    schedule,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (schedule != "-") FontWeight.Bold else FontWeight.Normal,
+                                    color = if (schedule == "SIANG") Color(0xFFE65100) else if (schedule == "PAGI") Color(0xFF1B5E20) else Color.Unspecified,
+                                    modifier = Modifier.width(70.dp),
+                                    textAlign = TextAlign.Center
+                                )
                                 Text(checkIn, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                                 Text(checkOut, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                                 Text("", fontSize = 11.sp, modifier = Modifier.width(60.dp), textAlign = TextAlign.Center)
