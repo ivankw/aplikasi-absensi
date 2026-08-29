@@ -3,6 +3,7 @@ package com.example.mysimpleapp
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
@@ -263,11 +264,33 @@ fun getCycleDates(): List<String> {
 data class UpdateInfo(
     val hasUpdate: Boolean,
     val releaseNotes: String = "",
-    val downloadUrl: String = ""
+    val downloadUrl: String = "",
+    val currentVersion: Long = 1L,
+    val latestVersion: Long = 1L
 )
+
+fun getAppVersionCode(context: Context): Long {
+    return try {
+        val pInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            pInfo.versionCode.toLong()
+        }
+    } catch (_: Exception) {
+        1L
+    }
+}
 
 suspend fun checkForAppUpdate(context: Context): UpdateInfo = withContext(Dispatchers.IO) {
     try {
+        val currentVersionCode = getAppVersionCode(context)
         val apiUrl = "https://api.github.com/repos/ivankw/aplikasi-absensi/releases/latest"
         val connection = URL(apiUrl).openConnection() as HttpURLConnection
         connection.connectTimeout = 7000
@@ -278,16 +301,29 @@ suspend fun checkForAppUpdate(context: Context): UpdateInfo = withContext(Dispat
         if (connection.responseCode == 200) {
             val responseText = connection.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(responseText)
+            val tagName = json.optString("tag_name", "")
+            val releaseName = json.optString("name", "")
             val body = json.optString("body", "Pembaruan versi terbaru tersedia.")
             val assets = json.optJSONArray("assets")
 
-            if (assets != null && assets.length() > 0) {
+            // Ambil nomor versi server dari tag_name atau title (contoh: "v25" -> 25)
+            val digitsOnly = tagName.filter { it.isDigit() }.ifBlank { releaseName.filter { it.isDigit() } }
+            val remoteVersionCode = digitsOnly.toLongOrNull() ?: 0L
+
+            // HANYA jika versi server lebih tinggi dari versi yang terpasang di HP
+            if (remoteVersionCode > currentVersionCode && assets != null && assets.length() > 0) {
                 for (i in 0 until assets.length()) {
                     val asset = assets.getJSONObject(i)
                     val name = asset.getString("name")
                     if (name.endsWith(".apk")) {
                         val downloadUrl = asset.getString("browser_download_url")
-                        return@withContext UpdateInfo(hasUpdate = true, releaseNotes = body, downloadUrl = downloadUrl)
+                        return@withContext UpdateInfo(
+                            hasUpdate = true,
+                            releaseNotes = body,
+                            downloadUrl = downloadUrl,
+                            currentVersion = currentVersionCode,
+                            latestVersion = remoteVersionCode
+                        )
                     }
                 }
             }
@@ -381,7 +417,7 @@ fun installApk(context: Context, apkFile: File) {
 }
 
 // ==========================================
-// 4. EXPORT KE EXCEL (6 KOLOM, TANPA DURASI)
+// 4. EXPORT KE EXCEL (6 KOLOM)
 // ==========================================
 
 fun exportToExcelTemplate(
@@ -404,12 +440,10 @@ fun exportToExcelTemplate(
         append("</head><body>")
         append("<table>")
 
-        // Baris 1 - 5: Kosong
         for (i in 1..5) {
             append("<tr style='height:18px;'><td colspan='6'></td></tr>")
         }
 
-        // Baris 6: Nama Pegawai & Periode Bulan
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Nama Pegawai</td>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>${profile.name}</td>")
@@ -417,7 +451,6 @@ fun exportToExcelTemplate(
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'></td>")
         append("</tr>")
 
-        // Baris 7: Jabatan / Divisi & NIK / ID
         append("<tr style='height:24px;'>")
         append("<td colspan='2' style='font-weight:bold; font-size:11pt;'>Jabatan / Divisi</td>")
         append("<td colspan='2' style='font-size:11pt;'>${profile.division}</td>")
@@ -425,10 +458,8 @@ fun exportToExcelTemplate(
         append("<td style='font-weight:bold; font-size:11pt; text-align:center;'>${profile.nik}</td>")
         append("</tr>")
 
-        // Baris 8: Kosong
         append("<tr style='height:18px;'><td colspan='6'></td></tr>")
 
-        // Baris 9: Header Tabel (6 Kolom: Tanpa Durasi)
         append("<tr>")
         append("<th class='header-cell' style='width:110px;'>Tanggal</th>")
         append("<th class='header-cell' style='width:100px;'>Jadwal</th>")
@@ -438,7 +469,6 @@ fun exportToExcelTemplate(
         append("<th class='header-cell' style='width:140px;'>Tanda Tangan SPV</th>")
         append("</tr>")
 
-        // Baris 10 s.d. Akhir Siklus (6 Kolom Data)
         cycleDates.forEach { dateKey ->
             val dayRecords = records.filter { it.date == dateKey }
             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -463,16 +493,13 @@ fun exportToExcelTemplate(
             append("</tr>")
         }
 
-        // Baris Pemisah
         append("<tr style='height:20px;'><td colspan='6'></td></tr>")
 
-        // Footer Baris 42: Judul Pengesahan
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:11pt;'>Dibuat oleh / Diisi oleh,</td>")
         append("<td colspan='3' style='text-align:center; font-size:11pt;'>Diperiksa & Disetujui oleh,</td>")
         append("</tr>")
 
-        // Footer Baris 43-44: Tanda Tangan
         append("<tr style='height:55px;'>")
         append("<td colspan='3' style='text-align:center; vertical-align:middle;'>")
         if (profile.signatureBase64.isNotBlank()) {
@@ -482,19 +509,16 @@ fun exportToExcelTemplate(
         append("<td colspan='3'></td>")
         append("</tr>")
 
-        // Footer Baris 45: NIK
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:10pt;'>${profile.nik}</td>")
         append("<td colspan='3' style='text-align:center; font-size:10pt;'>-</td>")
         append("</tr>")
 
-        // Footer Baris 46: Nama
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>${profile.name}</td>")
         append("<td colspan='3' style='text-align:center; font-weight:bold; font-size:11pt;'>Supervisor / Atasan Langsung</td>")
         append("</tr>")
 
-        // Footer Baris 47: Sub-Keterangan
         append("<tr>")
         append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Nama Staff / Pegawai</td>")
         append("<td colspan='3' style='text-align:center; font-size:9pt; color:#555555;'>Supervisor / Atasan Langsung</td>")
@@ -533,7 +557,7 @@ fun exportToExcelTemplate(
 }
 
 // ==========================================
-// 5. PREVIEW DIALOG (6 KOLOM, TANPA DURASI)
+// 5. PREVIEW DIALOG (6 KOLOM)
 // ==========================================
 
 @Composable
@@ -604,7 +628,6 @@ fun ReportPreviewDialog(
                             Text(profile.nik, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         }
 
-                        // Header Tabel Navy Blue (6 Kolom)
                         Row(
                             modifier = Modifier
                                 .background(Color(0xFF1B365D))
@@ -618,7 +641,6 @@ fun ReportPreviewDialog(
                             Text("TTD SPV", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.width(80.dp), textAlign = TextAlign.Center)
                         }
 
-                        // Baris Data (6 Kolom)
                         cycleDates.forEachIndexed { index, dateKey ->
                             val dayRecords = records.filter { it.date == dateKey }
                             val inRecord = dayRecords.firstOrNull { it.type.contains("LOGIN") }
@@ -669,7 +691,6 @@ fun ReportPreviewDialog(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Footer Pengesahan
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier.width(245.dp),
@@ -954,7 +975,7 @@ fun AttendanceScreen(
             title = { Text("🚀 Pembaruan Tersedia!", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text("Versi terbaru aplikasi telah dirilis di server.")
+                    Text("Versi terbaru aplikasi (Build ${updateInfo!!.latestVersion}) telah dirilis.")
                     Spacer(modifier = Modifier.height(8.dp))
                     if (isDownloadingUpdate) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -1184,7 +1205,8 @@ fun AttendanceScreen(
                         if (check.hasUpdate) {
                             updateInfo = check
                         } else {
-                            Toast.makeText(context, "Aplikasi sudah versi terbaru!", Toast.LENGTH_SHORT).show()
+                            val currentVer = getAppVersionCode(context)
+                            Toast.makeText(context, "Aplikasi sudah versi terbaru (Build $currentVer)!", Toast.LENGTH_SHORT).show()
                         }
                     }
                 },
